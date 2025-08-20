@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
@@ -9,96 +10,157 @@ use Illuminate\Http\Request;
 
 class EventController extends Controller
 {
+    /**
+     * TAMPILKAN LIST EVENTS (Public + Search/Filter/Pagination)
+     * GET /api/events
+     */
     public function index(Request $request)
     {
-        $query = Event::with('organizer');
+        // Mulai query Event dengan relasi organizer
+        $query = Event::with('organizer:id,name,email'); // Eager loading organizer info
 
-        // Search by title
-        if ($request->search) {
-            $query->where('title', 'LIKE', '%' . $request->search . '%');
+        // ===== SEARCH: Cari berdasarkan judul =====
+        if ($request->filled('search')) {
+            $searchTerm = $request->search;
+            $query->where('title', 'LIKE', '%' . $searchTerm . '%');
         }
 
-        // Filter by status
-        if ($request->status) {
+        // ===== FILTER: Filter berdasarkan status =====
+        if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
-        // Sort by start_datetime
-        $sortOrder = $request->sort === 'desc' ? 'desc' : 'asc';
+        // ===== SORTING: Urutkan berdasarkan tanggal mulai =====
+        $sortOrder = $request->sort === 'desc' ? 'desc' : 'asc'; // Default: ascending
         $query->orderBy('start_datetime', $sortOrder);
 
-        // For public, only show published events
-        if (!auth('api')->check() || auth('api')->user()->role !== 'admin') {
+        // ===== RBAC: Role-based filtering =====
+        $user = auth('api')->user();
+        
+        if (!$user) {
+            // User tidak login → hanya tampilkan published events
             $query->where('status', 'published');
+        } elseif ($user->role === 'organizer') {
+            // Organizer login → tampilkan published events + draft milik sendiri
+            $query->where(function($q) use ($user) {
+                $q->where('status', 'published')
+                  ->orWhere(function($subQ) use ($user) {
+                      $subQ->where('organizer_id', $user->id);
+                  });
+            });
         }
+        // Admin bisa lihat semua (tidak ada filter tambahan)
 
-        $perPage = $request->per_page ?? 10;
+        // ===== PAGINATION =====
+        $perPage = $request->per_page ?? 10; // Default 10 per halaman
         $events = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,
+            'message' => 'Events retrieved successfully',
             'data' => $events
         ]);
     }
 
+    /**
+     * TAMPILKAN DETAIL EVENT (Public)
+     * GET /api/events/{id}
+     */
     public function show(Event $event)
     {
-        $event->load('organizer');
+        // Load relasi organizer untuk detail lengkap
+        $event->load('organizer:id,name,email');
         
         return response()->json([
             'success' => true,
+            'message' => 'Event retrieved successfully',
             'data' => $event
         ]);
     }
 
+    /**
+     * CREATE EVENT BARU (Auth Required)
+     * POST /api/events
+     */
     public function store(StoreEventRequest $request)
     {
-        $event = Event::create([
-            ...$request->validated(),
-            'organizer_id' => auth('api')->id()
-        ]);
+        // Ambil data yang sudah divalidasi
+        $validatedData = $request->validated();
+        
+        // Tambahkan organizer_id dari user yang login
+        $validatedData['organizer_id'] = auth('api')->id();
+        
+        // Set default status jika tidak diisi
+        $validatedData['status'] = $validatedData['status'] ?? 'draft';
+
+        // Create event baru
+        $event = Event::create($validatedData);
+
+        // Load relasi organizer untuk response
+        $event->load('organizer:id,name,email');
 
         return response()->json([
             'success' => true,
             'message' => 'Event created successfully',
-            'data' => $event->load('organizer')
-        ], 201);
+            'data' => $event
+        ], 201); // HTTP 201 = Created
     }
 
+    /**
+     * UPDATE EVENT (Owner/Admin Only)
+     * PUT /api/events/{id}
+     */
     public function update(UpdateEventRequest $request, Event $event)
     {
-        // Check if user can update this event
-        if (auth('api')->user()->role !== 'admin' && $event->organizer_id !== auth('api')->id()) {
+        $user = auth('api')->user();
+
+        // ===== RBAC CHECK: Apakah user boleh update event ini? =====
+        if ($user->role !== 'admin' && $event->organizer_id !== $user->id) {
             return response()->json([
                 'success' => false,
-                'message' => 'Forbidden: You can only update your own events'
-            ], 403);
+                'message' => 'Forbidden: Anda hanya bisa mengubah event milik sendiri'
+            ], 403); // HTTP 403 = Forbidden
         }
 
+        // Update event dengan data yang divalidasi
         $event->update($request->validated());
+
+        // Refresh data dan load relasi
+        $event->refresh()->load('organizer:id,name,email');
 
         return response()->json([
             'success' => true,
             'message' => 'Event updated successfully',
-            'data' => $event->load('organizer')
+            'data' => $event
         ]);
     }
 
+    /**
+     * DELETE EVENT (Owner/Admin Only)
+     * DELETE /api/events/{id}
+     */
     public function destroy(Event $event)
     {
-        // Check if user can delete this event
-        if (auth('api')->user()->role !== 'admin' && $event->organizer_id !== auth('api')->id()) {
+        $user = auth('api')->user();
+
+        // ===== RBAC CHECK: Apakah user boleh delete event ini? =====
+        if ($user->role !== 'admin' && $event->organizer_id !== $user->id) {
             return response()->json([
                 'success' => false,
-                'message' => 'Forbidden: You can only delete your own events'
+                'message' => 'Forbidden: Anda hanya bisa menghapus event milik sendiri'
             ], 403);
         }
 
+        // Simpan data event sebelum dihapus (untuk response)
+        $deletedEvent = $event->toArray();
+
+        // Hapus event dari database
         $event->delete();
 
         return response()->json([
             'success' => true,
-            'message' => 'Event deleted successfully'
+            'message' => 'Event deleted successfully',
+            'deleted_event' => $deletedEvent
         ]);
     }
 }
