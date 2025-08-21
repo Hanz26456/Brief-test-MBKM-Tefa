@@ -189,21 +189,27 @@ class EventController extends Controller
     /**
      * Invalidate semua cache yang berkaitan dengan events
      */
-    private function invalidateEventsCache(): void
-    {
-        // Hapus semua cache yang dimulai dengan 'events_list_'
+   private function invalidateEventsCache(): void
+{
+    $store = Cache::getStore();
+
+    if ($store instanceof \Illuminate\Cache\RedisStore) {
+        // Selective clear hanya key yang match
         $cacheKeys = Cache::getRedis()->keys('*events_list_*');
-        
-        if (!empty($cacheKeys)) {
-            foreach ($cacheKeys as $key) {
-                // Remove prefix yang ditambah Laravel
-                $cleanKey = str_replace(config('cache.prefix') . ':', '', $key);
-                Cache::forget($cleanKey);
-            }
-            
-            Log::info('Events cache invalidated', [
-                'cleared_keys' => count($cacheKeys)
-            ]);
+
+        foreach ($cacheKeys as $key) {
+            $cleanKey = str_replace(config('cache.prefix') . ':', '', $key);
+            Cache::forget($cleanKey);
         }
+
+        Log::info('Events cache invalidated (Redis)', [
+            'cleared_keys' => count($cacheKeys)
+        ]);
+    } else {
+        // Fallback kalau cache driver bukan Redis
+        Cache::flush();
+        Log::info('Events cache invalidated using Cache::flush() (non-Redis driver)');
     }
+}
+
 }
