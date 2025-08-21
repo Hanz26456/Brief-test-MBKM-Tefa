@@ -308,14 +308,6 @@ composer dump-autoload
 - Install `laravel-cors` package jika diperlukan
 - Configure CORS di `config/cors.php`
 
-## 🤝 Contributing
-
-1. Fork repository ini
-2. Buat feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open Pull Request
-
 ## 📞 Contact
 
 **Nama**    : Muhammad Farhan Maulana  
