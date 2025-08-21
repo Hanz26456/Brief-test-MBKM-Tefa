@@ -15,7 +15,7 @@ class EventController extends Controller
 {
     /**
      * TAMPILKAN LIST EVENTS dengan Redis Caching
-     * Cache duration: 30 detik (sesuai brief)
+     * Cache duration: 30 detik 
      */
     public function index(Request $request)
     {
