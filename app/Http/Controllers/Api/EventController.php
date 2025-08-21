@@ -1,4 +1,5 @@
 <?php
+// app/Http/Controllers/Api/EventController.php
 
 namespace App\Http\Controllers\Api;
 
@@ -7,41 +8,58 @@ use App\Models\Event;
 use App\Http\Requests\StoreEventRequest;
 use App\Http\Requests\UpdateEventRequest;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class EventController extends Controller
 {
     /**
-     * TAMPILKAN LIST EVENTS (Public + Search/Filter/Pagination)
-     * GET /api/events
+     * TAMPILKAN LIST EVENTS dengan Redis Caching
+     * Cache duration: 30 detik (sesuai brief)
      */
     public function index(Request $request)
     {
-        // Mulai query Event dengan relasi organizer
-        $query = Event::with('organizer:id,name,email'); // Eager loading organizer info
+        // Generate cache key berdasarkan query parameters
+        $cacheKey = $this->generateCacheKey($request);
+        
+        // Coba ambil dari cache dulu
+        $cachedResult = Cache::get($cacheKey);
+        
+        if ($cachedResult) {
+            Log::info('Events served from cache', ['cache_key' => $cacheKey]);
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'Events retrieved successfully (cached)',
+                'data' => $cachedResult,
+                'cached' => true
+            ]);
+        }
 
-        // ===== SEARCH: Cari berdasarkan judul =====
+        // Jika tidak ada di cache, query database
+        $query = Event::with('organizer:id,name,email');
+
+        // Search by title
         if ($request->filled('search')) {
             $searchTerm = $request->search;
             $query->where('title', 'LIKE', '%' . $searchTerm . '%');
         }
 
-        // ===== FILTER: Filter berdasarkan status =====
+        // Filter by status
         if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
-        // ===== SORTING: Urutkan berdasarkan tanggal mulai =====
-        $sortOrder = $request->sort === 'desc' ? 'desc' : 'asc'; // Default: ascending
+        // Sort by start_datetime
+        $sortOrder = $request->sort === 'desc' ? 'desc' : 'asc';
         $query->orderBy('start_datetime', $sortOrder);
 
-        // ===== RBAC: Role-based filtering =====
+        // RBAC filtering
         $user = auth('api')->user();
         
         if (!$user) {
-            // User tidak login → hanya tampilkan published events
             $query->where('status', 'published');
         } elseif ($user->role === 'organizer') {
-            // Organizer login → tampilkan published events + draft milik sendiri
             $query->where(function($q) use ($user) {
                 $q->where('status', 'published')
                   ->orWhere(function($subQ) use ($user) {
@@ -49,84 +67,68 @@ class EventController extends Controller
                   });
             });
         }
-        // Admin bisa lihat semua (tidak ada filter tambahan)
 
-        // ===== PAGINATION =====
-        $perPage = $request->per_page ?? 10; // Default 10 per halaman
+        // Pagination
+        $perPage = $request->per_page ?? 10;
         $events = $query->paginate($perPage);
+
+        // Simpan ke cache selama 30 detik
+        Cache::put($cacheKey, $events, 30);
+        
+        Log::info('Events cached', [
+            'cache_key' => $cacheKey,
+            'duration' => '30 seconds'
+        ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Events retrieved successfully',
-            'data' => $events
+            'data' => $events,
+            'cached' => false
         ]);
     }
 
     /**
-     * TAMPILKAN DETAIL EVENT (Public)
-     * GET /api/events/{id}
-     */
-    public function show(Event $event)
-    {
-        // Load relasi organizer untuk detail lengkap
-        $event->load('organizer:id,name,email');
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'Event retrieved successfully',
-            'data' => $event
-        ]);
-    }
-
-    /**
-     * CREATE EVENT BARU (Auth Required)
-     * POST /api/events
+     * CREATE EVENT dengan Cache Invalidation
      */
     public function store(StoreEventRequest $request)
     {
-        // Ambil data yang sudah divalidasi
         $validatedData = $request->validated();
-        
-        // Tambahkan organizer_id dari user yang login
         $validatedData['organizer_id'] = auth('api')->id();
-        
-        // Set default status jika tidak diisi
         $validatedData['status'] = $validatedData['status'] ?? 'draft';
 
-        // Create event baru
         $event = Event::create($validatedData);
-
-        // Load relasi organizer untuk response
         $event->load('organizer:id,name,email');
+
+        // Invalidate cache karena ada event baru
+        $this->invalidateEventsCache();
 
         return response()->json([
             'success' => true,
             'message' => 'Event created successfully',
             'data' => $event
-        ], 201); // HTTP 201 = Created
+        ], 201);
     }
 
     /**
-     * UPDATE EVENT (Owner/Admin Only)
-     * PUT /api/events/{id}
+     * UPDATE EVENT dengan Cache Invalidation
      */
     public function update(UpdateEventRequest $request, Event $event)
     {
         $user = auth('api')->user();
 
-        // ===== RBAC CHECK: Apakah user boleh update event ini? =====
         if ($user->role !== 'admin' && $event->organizer_id !== $user->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Forbidden: Anda hanya bisa mengubah event milik sendiri'
-            ], 403); // HTTP 403 = Forbidden
+            ], 403);
         }
 
-        // Update event dengan data yang divalidasi
         $event->update($request->validated());
-
-        // Refresh data dan load relasi
         $event->refresh()->load('organizer:id,name,email');
+
+        // Invalidate cache karena event berubah
+        $this->invalidateEventsCache();
 
         return response()->json([
             'success' => true,
@@ -136,14 +138,12 @@ class EventController extends Controller
     }
 
     /**
-     * DELETE EVENT (Owner/Admin Only)
-     * DELETE /api/events/{id}
+     * DELETE EVENT dengan Cache Invalidation
      */
     public function destroy(Event $event)
     {
         $user = auth('api')->user();
 
-        // ===== RBAC CHECK: Apakah user boleh delete event ini? =====
         if ($user->role !== 'admin' && $event->organizer_id !== $user->id) {
             return response()->json([
                 'success' => false,
@@ -151,16 +151,59 @@ class EventController extends Controller
             ], 403);
         }
 
-        // Simpan data event sebelum dihapus (untuk response)
         $deletedEvent = $event->toArray();
-
-        // Hapus event dari database
         $event->delete();
+
+        // Invalidate cache karena event dihapus
+        $this->invalidateEventsCache();
 
         return response()->json([
             'success' => true,
             'message' => 'Event deleted successfully',
             'deleted_event' => $deletedEvent
         ]);
+    }
+
+    /**
+     * Generate cache key berdasarkan query parameters
+     */
+    private function generateCacheKey(Request $request): string
+    {
+        $user = auth('api')->user();
+        $userRole = $user ? $user->role : 'guest';
+        $userId = $user ? $user->id : 'anonymous';
+        
+        $params = [
+            'search' => $request->search ?? '',
+            'status' => $request->status ?? '',
+            'sort' => $request->sort ?? 'asc',
+            'page' => $request->page ?? 1,
+            'per_page' => $request->per_page ?? 10,
+            'user_role' => $userRole,
+            'user_id' => $userId
+        ];
+
+        return 'events_list_' . md5(serialize($params));
+    }
+
+    /**
+     * Invalidate semua cache yang berkaitan dengan events
+     */
+    private function invalidateEventsCache(): void
+    {
+        // Hapus semua cache yang dimulai dengan 'events_list_'
+        $cacheKeys = Cache::getRedis()->keys('*events_list_*');
+        
+        if (!empty($cacheKeys)) {
+            foreach ($cacheKeys as $key) {
+                // Remove prefix yang ditambah Laravel
+                $cleanKey = str_replace(config('cache.prefix') . ':', '', $key);
+                Cache::forget($cleanKey);
+            }
+            
+            Log::info('Events cache invalidated', [
+                'cleared_keys' => count($cacheKeys)
+            ]);
+        }
     }
 }

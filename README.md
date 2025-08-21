@@ -215,6 +215,9 @@ Setelah menjalankan `php artisan db:seed`, Anda dapat menggunakan akun berikut u
 - ✅ Lihat daftar event (hanya yang published)
 - ✅ Lihat detail event
 - ❌ Tidak bisa create/update/delete
+🧪 Testing Event Controller:
+1. Test List Events (Public - Tanpa Login):
+bashGET http://127.0.0.1:8000/api/events
 
 ### Organizer (Setelah Login)
 - ✅ Lihat semua event published
